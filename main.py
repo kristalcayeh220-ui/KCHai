@@ -1,8 +1,10 @@
+import asyncio
 import json
 import logging
 import os
 from contextlib import asynccontextmanager
 from functools import lru_cache
+import sqlite3
 from typing import Any
 
 import httpx
@@ -20,6 +22,8 @@ GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MESSENGER_API_URL = "https://graph.facebook.com/v23.0/me/messages"
 GROQ_MODEL = "openai/gpt-oss-20b"
 MAX_MESSENGER_TEXT_LENGTH = 2000
+MAX_HISTORY_MESSAGES = 12
+MAX_STORED_MESSAGES_PER_USER = 100
 FALLBACK_REPLY = "Please Wait For a Moment We Will Return Later"
 SYSTEM_PROMPT = """You are the official AI assistant for KRISTAL CAYE H220 Resort Facebook Page.
 
@@ -31,7 +35,7 @@ Please Wait For a Moment We Will Return Later
 
 Nothing else is allowed. No explanations. No emojis. No extra words.
 
-RULE PRIORITY (STRICT)
+RULE PRIORITY
 1. Booking / Reservation Rule
 
 If the user message is about booking, reservation, availability, scheduling, or how to reserve a slot at KRISTAL CAYE H220 Resort:
@@ -211,6 +215,9 @@ async def lifespan(app: FastAPI):
     timeout = httpx.Timeout(30.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         app.state.http_client = client
+        app.state.memory_db_path = os.getenv("MEMORY_DB_PATH", "bot_memory.db")
+        app.state.memory_lock = asyncio.Lock()
+        await initialize_memory_database(app.state.memory_db_path)
         yield
 
 
@@ -243,7 +250,130 @@ def extract_message_text(content: Any) -> str:
     return ""
 
 
-async def generate_groq_reply(user_text: str, client: httpx.AsyncClient) -> str:
+def initialize_memory_database_sync(db_path: str) -> None:
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sender_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_conversation_messages_sender_id_id
+            ON conversation_messages (sender_id, id)
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+async def initialize_memory_database(db_path: str) -> None:
+    await asyncio.to_thread(initialize_memory_database_sync, db_path)
+
+
+def fetch_conversation_history_sync(
+    db_path: str,
+    sender_id: str,
+    limit: int,
+) -> list[dict[str, str]]:
+    connection = sqlite3.connect(db_path)
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            """
+            SELECT role, content
+            FROM conversation_messages
+            WHERE sender_id = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (sender_id, limit),
+        ).fetchall()
+    finally:
+        connection.close()
+
+    return [
+        {"role": row["role"], "content": row["content"]}
+        for row in reversed(rows)
+    ]
+
+
+def store_conversation_turn_sync(
+    db_path: str,
+    sender_id: str,
+    user_text: str,
+    assistant_text: str,
+) -> None:
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executemany(
+            """
+            INSERT INTO conversation_messages (sender_id, role, content)
+            VALUES (?, ?, ?)
+            """,
+            [
+                (sender_id, "user", user_text),
+                (sender_id, "assistant", assistant_text),
+            ],
+        )
+        connection.execute(
+            """
+            DELETE FROM conversation_messages
+            WHERE sender_id = ?
+              AND id NOT IN (
+                  SELECT id
+                  FROM conversation_messages
+                  WHERE sender_id = ?
+                  ORDER BY id DESC
+                  LIMIT ?
+              )
+            """,
+            (sender_id, sender_id, MAX_STORED_MESSAGES_PER_USER),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+async def get_conversation_history(app: FastAPI, sender_id: str) -> list[dict[str, str]]:
+    async with app.state.memory_lock:
+        return await asyncio.to_thread(
+            fetch_conversation_history_sync,
+            app.state.memory_db_path,
+            sender_id,
+            MAX_HISTORY_MESSAGES,
+        )
+
+
+async def store_conversation_turn(
+    app: FastAPI,
+    sender_id: str,
+    user_text: str,
+    assistant_text: str,
+) -> None:
+    async with app.state.memory_lock:
+        await asyncio.to_thread(
+            store_conversation_turn_sync,
+            app.state.memory_db_path,
+            sender_id,
+            user_text,
+            assistant_text,
+        )
+
+
+async def generate_groq_reply(
+    user_text: str,
+    conversation_history: list[dict[str, str]],
+    client: httpx.AsyncClient,
+) -> str:
     settings = get_settings()
     headers = {
         "Authorization": f"Bearer {settings['groq_api_key']}",
@@ -257,6 +387,7 @@ async def generate_groq_reply(user_text: str, client: httpx.AsyncClient) -> str:
                 "role": "system",
                 "content": SYSTEM_PROMPT,
             },
+            *conversation_history,
             {"role": "user", "content": user_text},
         ],
     }
@@ -327,7 +458,11 @@ async def send_messenger_reply(recipient_id: str, text: str, client: httpx.Async
         raise
 
 
-async def handle_messaging_event(event: dict[str, Any], client: httpx.AsyncClient) -> None:
+async def handle_messaging_event(
+    event: dict[str, Any],
+    app: FastAPI,
+    client: httpx.AsyncClient,
+) -> None:
     sender = event.get("sender")
     if not isinstance(sender, dict):
         return
@@ -347,14 +482,21 @@ async def handle_messaging_event(event: dict[str, Any], client: httpx.AsyncClien
     if not isinstance(message_text, str) or not message_text.strip():
         return
 
+    user_text = message_text.strip()
+    conversation_history = await get_conversation_history(app, sender_id)
+    should_store_reply = False
+
     try:
-        reply_text = await generate_groq_reply(message_text.strip(), client)
+        reply_text = await generate_groq_reply(user_text, conversation_history, client)
+        should_store_reply = True
     except Exception:
         logger.exception("Failed to generate Groq reply for sender %s", sender_id)
         reply_text = FALLBACK_REPLY
 
     try:
         await send_messenger_reply(sender_id, reply_text, client)
+        if should_store_reply:
+            await store_conversation_turn(app, sender_id, user_text, reply_text)
     except Exception:
         logger.exception("Reply delivery failed for sender %s", sender_id)
 
@@ -411,7 +553,7 @@ async def receive_webhook(request: Request) -> JSONResponse:
         for event in messaging_events:
             if not isinstance(event, dict):
                 continue
-            await handle_messaging_event(event, client)
+            await handle_messaging_event(event, request.app, client)
 
     return JSONResponse(status_code=200, content={"status": "ok"})
 
