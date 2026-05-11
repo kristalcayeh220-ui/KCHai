@@ -86,6 +86,11 @@ CONTACT INFORMATION
 - Google Maps: https://maps.app.goo.gl/e487YTnvuZRr4Sxt5
 - Location: Tibangan Riles Zone 2, San Miguel, Bulacan, Philippines
 
+Cottage = Small Kubo — P300
+        - Big Kubo — P500
+        - Long Table + 6 Chairs — P250
+        - Videoke — P500
+
 RATES
 - P6,000 — Day Tour (9:00 AM 5:00 PM) — Includes 1 room
 - P7,000 — Night Swim — Includes 1 room
