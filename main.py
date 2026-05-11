@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -21,6 +22,8 @@ logger = logging.getLogger("messenger-bot")
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MESSENGER_API_URL = "https://graph.facebook.com/v23.0/me/messages"
 GROQ_MODEL = "openai/gpt-oss-20b"
+WAKEUP_MODEL = "llama-3.1-8b-instant"
+WAKEUP_INTERVAL_SECONDS = 14 * 60
 MAX_MESSENGER_TEXT_LENGTH = 2000
 MAX_HISTORY_MESSAGES = 12
 MAX_STORED_MESSAGES_PER_USER = 100
@@ -33,9 +36,11 @@ FINAL OUTPUT RULE
 If a question is NOT explicitly answered in the official information below, you MUST reply EXACTLY:
 Please Wait For a Moment We Will Return Later
 
+if the Customer Said "hm" It meant How Much. So you need to answer the question if it is about price or rates. But if the question is about booking, reservation, availability, scheduling, or how to reserve a slot at KRISTAL CAYE H220 Resort, you MUST reply with the FINAL OUTPUT RULE above.
+
 Nothing else is allowed. No explanations. No emojis. No extra words.
 
-RULE PRIORITY
+RULE PRIORITY (STRICT)
 1. Booking / Reservation Rule
 
 If the user message is about booking, reservation, availability, scheduling, or how to reserve a slot at KRISTAL CAYE H220 Resort:
@@ -156,19 +161,19 @@ If a customer asks:
 
 You MUST reply with:
 1. WALK-IN RATES
-2. OPTIONAL PAID ITEMS (FULL LIST)
+2. OPTIONAL PAID ITEMS If No Rent (FULL LIST)
 
 Required walk-in/entrance response format:
 WALK-IN RATES
 Day: P100 Adult / P80 Kids
+
 Night: P150 Adult / P100 Kids
 
-OPTIONAL PAID ITEMS
+OPTIONAL PAID ITEMS If No Rent
 Small Kubo P300
 Big Kubo P500
 Long Table + 6 Chairs P250
 Videoke P500
-2k php Per AirCon Room
 Cottage available
 
 RESPONSE RULES
@@ -219,7 +224,11 @@ async def lifespan(app: FastAPI):
         app.state.memory_db_path = os.getenv("MEMORY_DB_PATH", "bot_memory.db")
         app.state.memory_lock = asyncio.Lock()
         await initialize_memory_database(app.state.memory_db_path)
+        app.state.wakeup_task = asyncio.create_task(run_wakeup_loop(app))
         yield
+        app.state.wakeup_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await app.state.wakeup_task
 
 
 app = FastAPI(lifespan=lifespan)
@@ -430,6 +439,66 @@ async def generate_groq_reply(
         raise ValueError("Groq response content was empty")
 
     return clean_reply_text(reply_text)
+
+
+async def send_wakeup_ping(client: httpx.AsyncClient) -> None:
+    settings = get_settings()
+    headers = {
+        "Authorization": f"Bearer {settings['groq_api_key']}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": WAKEUP_MODEL,
+        "temperature": 0,
+        "messages": [
+            {"role": "system", "content": "Say ."},
+            {"role": "user", "content": "."},
+        ],
+    }
+
+    try:
+        response = await client.post(GROQ_API_URL, headers=headers, json=payload)
+        response.raise_for_status()
+        data = response.json()
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            logger.warning("Wake-up bot received no choices from Groq")
+            return
+
+        first_choice = choices[0]
+        if not isinstance(first_choice, dict):
+            logger.warning("Wake-up bot received invalid choice data from Groq")
+            return
+
+        message = first_choice.get("message")
+        if not isinstance(message, dict):
+            logger.warning("Wake-up bot received invalid message data from Groq")
+            return
+
+        reply_text = clean_reply_text(extract_message_text(message.get("content")))
+        logger.info("Wake-up bot response: %s", reply_text)
+    except httpx.HTTPStatusError as exc:
+        logger.error(
+            "Wake-up bot Groq API returned %s: %s",
+            exc.response.status_code,
+            exc.response.text,
+        )
+    except httpx.RequestError:
+        logger.exception("Wake-up bot request failed")
+    except json.JSONDecodeError:
+        logger.exception("Wake-up bot received invalid JSON")
+    except Exception:
+        logger.exception("Wake-up bot failed")
+
+
+async def run_wakeup_loop(app: FastAPI) -> None:
+    client: httpx.AsyncClient = app.state.http_client
+
+    await send_wakeup_ping(client)
+
+    while True:
+        await asyncio.sleep(WAKEUP_INTERVAL_SECONDS)
+        await send_wakeup_ping(client)
 
 
 async def send_messenger_reply(recipient_id: str, text: str, client: httpx.AsyncClient) -> None:
