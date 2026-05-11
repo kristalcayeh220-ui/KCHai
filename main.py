@@ -168,6 +168,7 @@ Small Kubo P300
 Big Kubo P500
 Long Table + 6 Chairs P250
 Videoke P500
+2k php Per AirCon Room
 Cottage available
 
 RESPONSE RULES
