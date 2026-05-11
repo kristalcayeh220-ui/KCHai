@@ -1,8 +1,6 @@
-import asyncio
 import json
 import logging
 import os
-from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from functools import lru_cache
 from typing import Any
@@ -22,7 +20,6 @@ GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MESSENGER_API_URL = "https://graph.facebook.com/v23.0/me/messages"
 GROQ_MODEL = "openai/gpt-oss-20b"
 MAX_MESSENGER_TEXT_LENGTH = 2000
-MAX_HISTORY_MESSAGES = 12
 FALLBACK_REPLY = "Please Wait For a Moment We Will Return Later"
 SYSTEM_PROMPT = """You are the official AI assistant for KRISTAL CAYE H220 Resort Facebook Page.
 
@@ -51,9 +48,9 @@ CONTACT INFORMATION
 - Location: Tibangan Riles Zone 2, San Miguel, Bulacan, Philippines
 
 RATES
-- P6,000 - Day Tour (9:00 AM-5:00 PM) - Includes 1 room
-- P7,000 - Night Swim - Includes 1 room
-- P12,000 - 22 Hours Stay - Includes 3 rooms
+- P6,000 — Day Tour (9:00 AM 5:00 PM) — Includes 1 room
+- P7,000 — Night Swim — Includes 1 room
+- P12,000 — 22 Hours Stay — Includes 3 rooms
 
 ROOM CAPACITY
 - The 3 rooms included in the 22 Hours Stay can accommodate more than 10 people
@@ -90,14 +87,14 @@ P12,000 (22 Hours Stay)
 - Cottage included
 
 OPTIONAL PAID ITEMS (WALK-IN / ENTRANCE ONLY)
-- Small Kubo - P300
-- Big Kubo - P500
-- Long Table + 6 Chairs - P250
-- Videoke - P500
-- Cottage - available
+- Small Kubo — P300
+- Big Kubo — P500
+- Long Table + 6 Chairs — P250
+- Videoke — P500
+- Cottage — available
 
 ADD-ONS
-- Catering service - P1,000 extra
+- Catering service — P1,000 extra
 
 BOOKING RULE (STRICT)
 If a customer asks about booking, reservation, availability, or how to reserve, reply EXACTLY:
@@ -105,9 +102,9 @@ Please Wait For a Moment We Will Return Later
 
 WALK-IN / ENTRANCE RULE (IMPORTANT)
 If a customer asks:
-- "Magkano walk-in?"
-- "Magkano entrance?"
-- "How much entrance?"
+- “Magkano walk-in?”
+- “Magkano entrance?”
+- “How much entrance?”
 
 You MUST reply with:
 1. WALK-IN RATES
@@ -127,7 +124,7 @@ Cottage available
 
 RESPONSE RULES
 - Friendly, polite, professional tone
-- Always use exact name: "KRISTAL CAYE H220 Resort"
+- Always use exact name: “KRISTAL CAYE H220 Resort”
 - Never shorten or modify the resort name
 - Never guess or invent information
 - Only use official data above
@@ -170,10 +167,6 @@ async def lifespan(app: FastAPI):
     timeout = httpx.Timeout(30.0, connect=10.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         app.state.http_client = client
-        app.state.conversation_histories = defaultdict(
-            lambda: deque(maxlen=MAX_HISTORY_MESSAGES)
-        )
-        app.state.history_lock = asyncio.Lock()
         yield
 
 
@@ -206,31 +199,7 @@ def extract_message_text(content: Any) -> str:
     return ""
 
 
-async def get_conversation_history(app: FastAPI, sender_id: str) -> list[dict[str, str]]:
-    async with app.state.history_lock:
-        history = app.state.conversation_histories.get(sender_id)
-        if history is None:
-            return []
-        return list(history)
-
-
-async def store_conversation_turn(
-    app: FastAPI,
-    sender_id: str,
-    user_text: str,
-    assistant_text: str,
-) -> None:
-    async with app.state.history_lock:
-        history = app.state.conversation_histories[sender_id]
-        history.append({"role": "user", "content": user_text})
-        history.append({"role": "assistant", "content": assistant_text})
-
-
-async def generate_groq_reply(
-    user_text: str,
-    conversation_history: list[dict[str, str]],
-    client: httpx.AsyncClient,
-) -> str:
+async def generate_groq_reply(user_text: str, client: httpx.AsyncClient) -> str:
     settings = get_settings()
     headers = {
         "Authorization": f"Bearer {settings['groq_api_key']}",
@@ -244,7 +213,6 @@ async def generate_groq_reply(
                 "role": "system",
                 "content": SYSTEM_PROMPT,
             },
-            *conversation_history,
             {"role": "user", "content": user_text},
         ],
     }
@@ -315,11 +283,7 @@ async def send_messenger_reply(recipient_id: str, text: str, client: httpx.Async
         raise
 
 
-async def handle_messaging_event(
-    event: dict[str, Any],
-    app: FastAPI,
-    client: httpx.AsyncClient,
-) -> None:
+async def handle_messaging_event(event: dict[str, Any], client: httpx.AsyncClient) -> None:
     sender = event.get("sender")
     if not isinstance(sender, dict):
         return
@@ -339,21 +303,14 @@ async def handle_messaging_event(
     if not isinstance(message_text, str) or not message_text.strip():
         return
 
-    user_text = message_text.strip()
-    conversation_history = await get_conversation_history(app, sender_id)
-    should_store_reply = False
-
     try:
-        reply_text = await generate_groq_reply(user_text, conversation_history, client)
-        should_store_reply = True
+        reply_text = await generate_groq_reply(message_text.strip(), client)
     except Exception:
         logger.exception("Failed to generate Groq reply for sender %s", sender_id)
         reply_text = FALLBACK_REPLY
 
     try:
         await send_messenger_reply(sender_id, reply_text, client)
-        if should_store_reply:
-            await store_conversation_turn(app, sender_id, user_text, reply_text)
     except Exception:
         logger.exception("Reply delivery failed for sender %s", sender_id)
 
@@ -410,7 +367,7 @@ async def receive_webhook(request: Request) -> JSONResponse:
         for event in messaging_events:
             if not isinstance(event, dict):
                 continue
-            await handle_messaging_event(event, request.app, client)
+            await handle_messaging_event(event, client)
 
     return JSONResponse(status_code=200, content={"status": "ok"})
 
