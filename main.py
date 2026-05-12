@@ -96,7 +96,7 @@ Cottage = Small Kubo — P300
         - Videoke — P500
 
 RATES
-- P6,000 — Day Tour (9:00 AM 5:00 PM) — Includes 1 room
+- P6,000 — Day (9:00 AM 5:00 PM) — Includes 1 room
 - P7,000 — Night Swim — Includes 1 room
 - P12,000 — 22 Hours Stay — Includes 3 rooms
 
@@ -113,11 +113,11 @@ Night
 - P100 Kids
 
 AMENITIES RULE
-- RENT STAY (P6,000 / P7,000 / P12,000) = ALL MAIN AMENITIES INCLUDED
+- RENT (P6,000 / P7,000 / P12,000) = ALL MAIN AMENITIES INCLUDED
 - WALK-IN ONLY = amenities and items are paid separately
 
 AMENITIES (RENT STAY ONLY)
-P6,000 / P7,000 (1 room included)
+P6,000 / P7,000 Rent (1 room included)
 - Free WiFi (after following Facebook page)
 - Videoke
 - Big pool with jacuzzi
@@ -128,7 +128,7 @@ P6,000 / P7,000 (1 room included)
 - Tables and chairs
 - Cottage included
 
-P12,000 (22 Hours Stay)
+P12,000 Rent (22 Hours Stay)
 - 3 rooms included
 - All amenities included
 - Can accommodate more than 10 people
